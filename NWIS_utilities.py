@@ -116,6 +116,8 @@ def read_state_county_FIPS():
     <mnfienen *at* usgs *dot* gov>
     
     INPUT:
+    state_file --> A csv file of state FIPS numbers must be available in a sub-directory
+    county_file --> A csv file of county FIPS numbers must be available in a sub-directory
     none --> the variables are all already named
     
     OUTPUT:
@@ -127,8 +129,8 @@ def read_state_county_FIPS():
                     state codes, and county names
     '''
     # filenames for the State and County lookups
-    state_file = os.path.join('..','NWIS_meta_data','STATE_FIPS.csv')
-    county_file = os.path.join('..','NWIS_meta_data','COUNTY_FIPS.csv')
+    state_file = os.path.join('NWIS_meta_data','STATE_FIPS.csv')
+    county_file = os.path.join('NWIS_meta_data','COUNTY_FIPS.csv')
     #
     # read in the county file --> READ THE "HARD WAY"
     #
