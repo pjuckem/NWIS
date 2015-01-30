@@ -13,24 +13,22 @@ state_lookup_full -->  file with site information for wells in NWIS that meet cr
 
 '''
 import os
-from shapely.geometry import Point
-import flux_targets as ft
 import arcpy
 import geopandas as gpd
-from fiona import crs
+import numpy as np
 import NWIS_utilities as nwispy
 
 # Inputs
-model_domain = 'D:/PFJData2/Projects/NAQWA/Cycle3/FWP/ARC/FWPvert_domain_UTMft.shp'
+model_domain = 'D:/PFJData2/Projects/NAQWA/Cycle3/FWP/ARC/PEST/FluxTargetHUCS.shp'
 #UTM83Z16_ft = {u'proj':u'utm', u'zone':16, u'datum':u'NAD83', u'units':u'us-ft', u'no_defs':True} #UTM83 zone 16 feet, manually defined
-wi_counties = 'D:/ARC/Basemaps/Wisconsin/Statewide/Boundaries/county_bnds/county_bnds.shp'
+counties = 'D:/ARC/Basemaps/National/Boundaries/UScounties.shp'
 #wi_counties_crs = 102973
 #wi_counties_crs = crs.from_epsg(wi_counties_crs)
 #inputEPSG = 4326 # lat long
 
 startdate = '1970-01-01'
 enddate = '2012-12-31'
-stateFIPS = '055'
+#stateFIPS = '055'
 
 #pump_gdf = gpd.GeoDataFrame(pumpdf, crs=UTM83Z16_ft)
 
@@ -43,29 +41,45 @@ dtwSCfile = os.path.join(output_folder, dtwSCfile)
 arc_folder = 'D:/PFJData2/Projects/NAQWA/Cycle3/FWP/ARC'
 fwpcounties = 'fwpcounties.shp'
 fwpcounties = os.path.join(arc_folder, fwpcounties)
+countylistfile = 'D:/PFJData2/Projects/NAQWA/Cycle3/FWP/MODFLOW/PESTsetup/countylist.dat'
 
 if __name__ == '__main__':
+    fipslist = open(countylistfile, 'w')
     arcpy.env.overwriteOutput = True
-    #bounds = gpd.read_file(model_domain)
-    #counties = gpd.read_file(wi_counties)
-    #counties.to_crs(epsg=wi_counties_crs, inplace=True)
-    #counties.to_crs(UTM83Z16_ft, inplace=True) # UTM83 zone 16ft
-    #domain_counties = bounds.intersection(counties)
-    #domain_counties.to_file(fwpcounties)
-    arcpy.Intersect_analysis([model_domain, wi_counties], fwpcounties, 'ALL')
+    arcpy.Intersect_analysis([model_domain, counties], fwpcounties, 'ALL')
     domain_counties = gpd.read_file(fwpcounties)
-    countyFIPS = domain_counties['CTY_FIPS'].values
-    for cCounty in countyFIPS:
+    allFIPS = domain_counties['FIPS'].values
+    # countyFIPS = domain_counties['CNTY_FIPS'].values
+    # stateFIPS = np.array(domain_counties['STATE_FIPS'].values)
+    # stateFIPS = np.unique(stateFIPS)
+
+    for fips in allFIPS:
+        state = fips[:2]
+        county = fips[-3:]
         sfront, sback = os.path.splitext(siteSCfile)
-        sitefile = sfront + '_' + str(cCounty) + sback
+        sitefile = sfront + '_' + str(fips) + sback
         dtwfront, dtwback = os.path.splitext(dtwSCfile)
-        dtwfile = dtwfront + '_' + str(cCounty) + dtwback
-        nwispy.puller_by_state_county('site',stateFIPS,cCounty,startdate,enddate,sitefile,'county')
-        nwispy.puller_by_state_county('gwlevels',stateFIPS,cCounty,startdate,enddate,dtwfile,'county')
-        nwispy.puller_by_latlong('site',stateFIPS,cCounty,startdate,enddate,sitefile,'county')
-        nwispy.puller_by_latlong('gwlevels',stateFIPS,cCounty,startdate,enddate,dtwfile,'county')
-
-
+        dtwfile = dtwfront + '_' + str(fips) + dtwback
+        nwispy.puller_by_state_county('site',state,county,startdate,enddate,sitefile,'county')
+        nwispy.puller_by_state_county('gwlevels',state,county,startdate,enddate,dtwfile,'county')
+        #nwispy.puller_by_latlong('site',stateFIPS,cCounty,startdate,enddate,sitefile,'county')
+        #nwispy.puller_by_latlong('gwlevels',stateFIPS,cCounty,startdate,enddate,dtwfile,'county')
+        fipslist.write(str(fips) + ', ')
+    fipslist.close()
+    '''
+    for state in stateFIPS:
+        for cCounty in countyFIPS:
+            sfront, sback = os.path.splitext(siteSCfile)
+            sitefile = sfront + '_' + str(state) + str(cCounty) + sback
+            dtwfront, dtwback = os.path.splitext(dtwSCfile)
+            dtwfile = dtwfront + '_' + str(state) + str(cCounty) + dtwback
+            nwispy.puller_by_state_county('site',state,cCounty,startdate,enddate,sitefile,'county')
+            nwispy.puller_by_state_county('gwlevels',state,cCounty,startdate,enddate,dtwfile,'county')
+            #nwispy.puller_by_latlong('site',stateFIPS,cCounty,startdate,enddate,sitefile,'county')
+            #nwispy.puller_by_latlong('gwlevels',stateFIPS,cCounty,startdate,enddate,dtwfile,'county')
+            statecounty = str(state+cCounty)
+            fipslist.write(statecounty + ', ')
+'''
 
 
 
