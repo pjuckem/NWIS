@@ -29,6 +29,7 @@ import os
 import flopy
 import ogr
 import arcpy
+import math
 
 if sys.platform == 'darwin' or 'nix' in sys.platform:
     newline = '\r\n'
@@ -53,6 +54,7 @@ datadir = 'D:/PFJData2/Projects/NAQWA/Cycle3/FWP/MODFLOW/PESTsetup/'
 infofileprefix = 'mwell_siteinfo_'
 levelfileprefix = 'mwell_dtw_'
 countylistfile = 'D:/PFJData2/Projects/NAQWA/Cycle3/FWP/MODFLOW/PESTsetup/countylist.dat'
+NAWQAwells = 'D:\PFJData2\Projects\NAQWA\C3GIS\All_sites.shp'
 #countylist = ['137']  # note: 141 = wood county = some wells in;some out
 
 # MOD2OBS input:  *.spc and *.fig exported from GWvistas.  Need to update for multi-layer models.
@@ -74,6 +76,8 @@ ss_arbitrary_date = '12/20/2012'
 ss_arbitrary_time = '12:00:00'
 
 # Settings
+glacial_networks = ['glacetn1', 'glacfps1', 'glacpas1', 'wmicfpsag2a', 'wmicfpsag2b', 'wmiclusag1a', 'wmiclusag1b',
+                  'wmiclusag2', 'wmicreffo1', 'wmicsus2']
 glac_only = True
 #decluster = True
 #decluster_radius = 2000  # units of the projection (usually meters, except ft if using UTM-feet)
@@ -182,8 +186,31 @@ def getheader(filename,indicator,delimiter):
 '''
 MAIN CODE
 '''
+print "getting list of NAWQA wells"
+# Use Geopandas to clip full NAWQA well database to calibration area.
+# Hack to process the returned bool series (there has to be a better way...)
+# Note: can't use arcpy.clip because object dtype columns get dropped, such as station name.
+calib = gpd.read_file(calib_area)
+geom = calib.geometry
+nawqa = gpd.read_file(NAWQAwells)
 
-print "getting well info, water levels, and coordinates..."
+keep = [geom.contains(pt) for pt in nawqa['geometry']]
+lst = []
+for r, ser in enumerate(keep):
+    val = str(keep[r]).split()[1]
+    if val == 'True': val = True
+    elif val == 'False': val = False
+    else:
+        print "error"
+        break
+    lst.append(val)
+nawqa.loc[:,'keep'] = lst
+nawqa = nawqa.loc[nawqa['keep']==True, :]  # remove wells outside the calibration area from the dataframe
+nawqa = nawqa.loc[nawqa['SuCode'].isin(glacial_networks), :]  # keep only wells in the glacial aquifer
+nawqa = nawqa.set_index('SITE_NO')
+nawqalst = nawqa['SITE_NO'].tolist()
+
+print "getting well info, water levels, and coordinates from NWIS..."
 countyfile = open(countylistfile, 'r')
 countylist = countyfile.readline().split(',')
 countylist = ''.join(countylist).split()  # convert to str, remove whitespaces
@@ -250,8 +277,9 @@ levelsdf = levelsdf.loc[levelsdf['lev_acy_cd']!=(''), :]
 levelsdf.lev_acy_cd = levelsdf.lev_acy_cd.astype(float)
 
 # Filter the dataset, evaluate accuracy codes, compute average WLs
+# only remove non-NAWQA wells
 levelsdf = levelsdf.copy().join(siteinfodf.loc[:, ['alt_acy_va']])  # join based on the indexes
-levelsdf = levelsdf.loc[~levelsdf['lev_status_cd'].isin(discard_lev_status_cd), :] # keep msmts w/out errors. Note: the "~"
+levelsdf = (levelsdf.loc[~levelsdf['lev_status_cd'].isin(discard_lev_status_cd), :] and levelsdf.loc[~levelsdf['site_no'].isin(nawqalst), :])  # keep msmts w/out errors. Note: the "~"
 # add columns then decode the dictionaries
 levelsdf['src_err'] = levelsdf['lev_src_cd'].copy()
 levelsdf['meth_err'] = levelsdf['lev_meth_cd'].copy()
@@ -263,9 +291,10 @@ levelsdf['cum_err'] = levelsdf['levacy_err'] + levelsdf['meth_err'] + levelsdf['
 
 if onlysubft:
     print "limiting wells to those with cumulative measurement errors < 1 ft"
-    levelsdf = levelsdf[(levelsdf['cum_err'] < 1.0)]  # This retains many decent USGS wells.
+    # retains only decent USGS wells.
+    levelsdf = (levelsdf[(levelsdf['cum_err'] < 1.0)] and levelsdf.loc[~levelsdf['site_no'].isin(nawqalst), :])
 levelsdf['n_msmts'] = levelsdf.groupby(['site_no'])['lev_va'].count()
-levelsdf = levelsdf[(levelsdf['alt_acy_va'] <= 0.01) | (levelsdf['n_msmts'] >= min_msmts)]  # min threshold for keeping
+levelsdf = (levelsdf[(levelsdf['alt_acy_va'] <= 0.01) | (levelsdf['n_msmts'] >= min_msmts)] and levelsdf.loc[~levelsdf['site_no'].isin(nawqalst), :])  # min threshold for keeping
 
 # Limit by dates, process for errors, compute ave WL.
 levelsdf['lev_dt'] = pd.to_datetime(levelsdf['lev_dt'])
@@ -290,9 +319,20 @@ lev2 = lev2.copy().join(tdiff2.loc[:])  # add time differences
 # Duration of msmts & number of msmts deemed most important for weights.  Secondarily, highly accurate altitudes are
 # likely associated with accurate locations (RTK-GPS), so alt_err also a priority.
 # Priority for weighting: 1) time span, 2) # measurements, 3) alt accuracy, 4) cum msmt err
-print "assigning weights"
+print "assigning weights & target groups"
 lev2['weight'] = -1.0
+# Compute weight as 1/(composite-std), where composite-std is computed as the squareroot of the sum of variances associated with
+# 1. locational error, 2. measurement error, and 3. number of measurements.  The standard deviation for weighting based on the
+# number of measurements has nothing to do with the variability of the measured values.  Instead, the std value is computed as
+# 1/squareroot of the number of measurements.  Thus, wells with many msmts have less uncertainty (std) associated with them.
+
+lev2['weight'] = 1/(math.sqrt((lev2.alt_acy_va)^2 + (lev2.cum_err)^2 + (1/math.sqrt(lev2.n_msmts))^2))
+
 lev2['group'] = 'NoGroup'
+condlist = [lev2['td']>=10*365.25, lev2['td']>=365.25, lev2['td']<365.25]
+choicelist = ['long-term', 'medium-term', 'short-term']
+lev2['group'] = np.select(condlist, choicelist,'OOPS')
+'''
 for i, s in lev2.iterrows():
     #   map or GPS location?    Measured with tape or estimated?   approx 2 msmts per year?    > 20 yrs of record?
     if (lev2.alt_acy_va[i] <= .5 and lev2.cum_err[i] <= .1 and lev2.n_msmts[i] >= 40 and lev2.td[i] >= (20* 365.242)):  #BEST of the best
@@ -352,16 +392,17 @@ for i, s in lev2.iterrows():
         lev2.loc[i, 'group'] = 'few-msmt_well'
 
     else: lev2.loc[i, 'weight'] = -2.0  # Should ID problems
-
+'''
 # Join-in site information
 lev3 = lev2.join(siteinfodf.loc[:, ['station_nm', 'county_cd', 'dec_lat_va', 'dec_long_va', 'coord_acy_cd',
                                      'nat_aqfr_cd', 'aqfr_cd', 'aqfr_type_cd', 'alt_va', 'well_depth_va']])
 
-# Keep only glacial wells w/ accuracy of 5 seconds or better (BR can tolerate less accuracy due to flow sys detail)
+# Keep only glacial wells
 if glac_only:
     print "removing non-glacial wells"
     lev3 = lev3[((lev3['aqfr_cd'] == '100SDGV') | (lev3['nat_aqfr_cd'] == 'N100GLCIAL') | (lev3['aqfr_cd'] == '') |
                   (lev3['aqfr_cd'] == '110QRNR') | (lev3['aqfr_cd'] == '110SDGVP') | (lev3['aqfr_cd'] == '110SANDP'))]
+    # Keep only glacial wells w/ accuracy of 5 seconds or better (BR can tolerate less accuracy due to flow sys detail)
     #lev3 = lev3.loc[lev3['coord_acy_cd'].isin(keep_coord_cd), :]  # keep sites with location w/in +/- X seconds (F=5sec)
 
 print "re-projecting coordinates to UTM-ft, and clipping to the calibration area"
@@ -378,7 +419,7 @@ lev3.to_crs(crs=UTM83Z16_ft, inplace=True)
 
 # Use Geopandas to determine which points are in/out.
 # Hack to process the returned bool series (there has to be a better way...)
-# Note: can't use arcpy.clip because object dtype columns are dropped, such as station name.
+# Note: can't use arcpy.clip because object dtype columns get dropped, such as station name.
 calib = gpd.read_file(calib_area)
 geom = calib.geometry
 keep = [geom.contains(pt) for pt in lev3['geometry']]
