@@ -29,7 +29,7 @@ import os
 import flopy
 import ogr
 import arcpy
-import math
+
 
 if sys.platform == 'darwin' or 'nix' in sys.platform:
     newline = '\r\n'
@@ -77,7 +77,7 @@ ss_arbitrary_time = '12:00:00'
 
 # Settings
 glacial_networks = ['glacetn1', 'glacfps1', 'glacpas1', 'wmicfpsag2a', 'wmicfpsag2b', 'wmiclusag1a', 'wmiclusag1b',
-                  'wmiclusag2', 'wmicreffo1', 'wmicsus2']
+                  'wmiclusag2', 'wmicreffo1', 'wmicsus2', 'glacmss1']
 glac_only = True
 #decluster = True
 #decluster_radius = 2000  # units of the projection (usually meters, except ft if using UTM-feet)
@@ -95,7 +95,8 @@ discard_lev_status_cd=['A','B','D','E','F','G','H','I','J','M','N','O','P','R','
 # list of coordinate_codes to keep. Keeping only wells with locations better or equal to 5 degree-seconds (F)
 #keep_coord_cd = {'H', '1', '5', 'S', 'R', 'F'}  # might want to add 'T' (10 degree-seconds, or about 900ft latitude)
 # keep_coords_cd now removed b/c many long-term wells are coded as 1-minute accuracy, but is likely better than that.
-# house keeping
+
+# misc variables
 driverfile = os.path.join(outpath, driverfile)
 bore_coords_file = os.path.join(outpath, bore_coords_file)
 bore_list_file = os.path.join(outpath, bore_list_file)
@@ -105,6 +106,9 @@ insfile = os.path.join(outpath, insfile)
 pest_head_obs_sect_file = os.path.join(outpath, pest_head_obs_sect_file)
 spc_file = os.path.join(outpath, spc_file)
 output_file = os.path.join(outpath, output_file)
+UTM83Z16_ft = {u'proj':u'utm', u'zone':16, u'datum':u'NAD83', u'units':u'us-ft', u'no_defs':True}  # UTM83 zone 16 feet
+#USGSalbers = {u'proj':u'aea', u'datum':u'NAD83', u'lon_0':-96.0 , u'lat_0':23, u'lat_1':29.5, u'lat_2':45.5,
+#              u'x_0':0, u'y_0':0, u'units':u'm', u'no_defs':True}
 
 '''
 FUNCTIONS
@@ -194,6 +198,9 @@ calib = gpd.read_file(calib_area)
 geom = calib.geometry
 nawqa = gpd.read_file(NAWQAwells)
 
+usgsalbers = nawqa.crs
+nawqa.to_crs(crs=UTM83Z16_ft, inplace=True)
+
 keep = [geom.contains(pt) for pt in nawqa['geometry']]
 lst = []
 for r, ser in enumerate(keep):
@@ -207,10 +214,10 @@ for r, ser in enumerate(keep):
 nawqa.loc[:,'keep'] = lst
 nawqa = nawqa.loc[nawqa['keep']==True, :]  # remove wells outside the calibration area from the dataframe
 nawqa = nawqa.loc[nawqa['SuCode'].isin(glacial_networks), :]  # keep only wells in the glacial aquifer
-nawqa = nawqa.set_index('SITE_NO')
-nawqalst = nawqa['SITE_NO'].tolist()
+lst = nawqa['SITE_NO'].tolist()
+nawqalst = [int(id) for id in lst]
 
-print "getting well info, water levels, and coordinates from NWIS..."
+print "getting all well info, water levels, and coordinates per county from NWIS..."
 countyfile = open(countylistfile, 'r')
 countylist = countyfile.readline().split(',')
 countylist = ''.join(countylist).split()  # convert to str, remove whitespaces
@@ -279,7 +286,11 @@ levelsdf.lev_acy_cd = levelsdf.lev_acy_cd.astype(float)
 # Filter the dataset, evaluate accuracy codes, compute average WLs
 # only remove non-NAWQA wells
 levelsdf = levelsdf.copy().join(siteinfodf.loc[:, ['alt_acy_va']])  # join based on the indexes
-levelsdf = (levelsdf.loc[~levelsdf['lev_status_cd'].isin(discard_lev_status_cd), :] and levelsdf.loc[~levelsdf['site_no'].isin(nawqalst), :])  # keep msmts w/out errors. Note: the "~"
+naw = levelsdf['site_no'].isin(nawqalst)
+levkeep = ~levelsdf['lev_status_cd'].isin(discard_lev_status_cd)  # keep msmts w/out errors. Note: the "~"
+keeps = naw | levkeep  # keep msmts w/out errors...unless are NAWQA wells (must keep all NAWQA wells)
+levelsdf = levelsdf.loc[keeps]
+#levelsdf = (levelsdf.loc[~levelsdf['lev_status_cd'].isin(discard_lev_status_cd), :] | levelsdf.loc[~levelsdf['site_no'].isin(nawqalst), :])  # memory error
 # add columns then decode the dictionaries
 levelsdf['src_err'] = levelsdf['lev_src_cd'].copy()
 levelsdf['meth_err'] = levelsdf['lev_meth_cd'].copy()
@@ -292,13 +303,31 @@ levelsdf['cum_err'] = levelsdf['levacy_err'] + levelsdf['meth_err'] + levelsdf['
 if onlysubft:
     print "limiting wells to those with cumulative measurement errors < 1 ft"
     # retains only decent USGS wells.
-    levelsdf = (levelsdf[(levelsdf['cum_err'] < 1.0)] and levelsdf.loc[~levelsdf['site_no'].isin(nawqalst), :])
+    okerr = levelsdf['cum_err'] < 1.0
+    naw = levelsdf['site_no'].isin(nawqalst)  # must redo b/c levelsdf was purged after previous setting of this bool array.
+    keeps = naw | okerr
+    levelsdf = levelsdf.loc[keeps]
+    #levelsdf = (levelsdf[(levelsdf['cum_err'] < 1.0)] | levelsdf.loc[~levelsdf['site_no'].isin(nawqalst), :])  # memory error
+
+# min requirements for keeping
 levelsdf['n_msmts'] = levelsdf.groupby(['site_no'])['lev_va'].count()
-levelsdf = (levelsdf[(levelsdf['alt_acy_va'] <= 0.01) | (levelsdf['n_msmts'] >= min_msmts)] and levelsdf.loc[~levelsdf['site_no'].isin(nawqalst), :])  # min threshold for keeping
+#okacy = levelsdf['alt_acy_va'] <= 0.01  # this keeps wells that might otherwise be discarded (1 msmt), except those that were professionally surveyed
+oknmsmt = levelsdf['n_msmts'] >= min_msmts
+naw = levelsdf['site_no'].isin(nawqalst)
+#keeps = naw | okacy | oknmsmt  # keep msmts w/ OK accuracy OR min # msmts or is a NAWQA well
+keeps = naw | oknmsmt  # keep msmts w/ OK accuracy OR min # msmts or is a NAWQA well
+levelsdf = levelsdf.loc[keeps]
+#levelsdf = (levelsdf[(levelsdf['alt_acy_va'] <= 0.01) | (levelsdf['n_msmts'] >= min_msmts)] | levelsdf.loc[~levelsdf['site_no'].isin(nawqalst), :])
 
 # Limit by dates, process for errors, compute ave WL.
 levelsdf['lev_dt'] = pd.to_datetime(levelsdf['lev_dt'])
-levelsdf = levelsdf[(levelsdf['lev_dt'] >= start) & (levelsdf['lev_dt'] <= end)]
+okstrt = levelsdf['lev_dt'] >= start
+okend = levelsdf['lev_dt'] <= end
+okdates = okstrt & okend
+naw = levelsdf['site_no'].isin(nawqalst)
+keeps = naw | okdates  # keep msmts w/ ok date range or a NAWQA well
+levelsdf = levelsdf.loc[keeps]
+#levelsdf = (levelsdf[(levelsdf['lev_dt'] >= start) & (levelsdf['lev_dt'] <= end)] | levelsdf.loc[~levelsdf['site_no'].isin(nawqalst), :])
 levelsdf['first'] = levelsdf.groupby(['site_no'])['lev_dt'].min()
 levelsdf['last'] = levelsdf.groupby(['site_no'])['lev_dt'].max()
 tdiff = levelsdf['last'] - levelsdf['first']  # minimum of 1 day
@@ -322,11 +351,14 @@ lev2 = lev2.copy().join(tdiff2.loc[:])  # add time differences
 print "assigning weights & target groups"
 lev2['weight'] = -1.0
 # Compute weight as 1/(composite-std), where composite-std is computed as the squareroot of the sum of variances associated with
-# 1. locational error, 2. measurement error, and 3. number of measurements.  The standard deviation for weighting based on the
+# 1. half the altitude error, 2. measurement error, and 3. number of measurements.  The standard deviation for weighting based on the
 # number of measurements has nothing to do with the variability of the measured values.  Instead, the std value is computed as
 # 1/squareroot of the number of measurements.  Thus, wells with many msmts have less uncertainty (std) associated with them.
+# Altitude error was not squared (add std rather than var) because it was overly diluting weights for long-term wells that
+# had never been surveyed. That is, it was counter-acting the value of long-term records for wells in the GW network.
 
-lev2['weight'] = 1/(math.sqrt((lev2.alt_acy_va)^2 + (lev2.cum_err)^2 + (1/math.sqrt(lev2.n_msmts))^2))
+# lev2['weight'] = 1/(np.sqrt((lev2.alt_acy_va) + (lev2.cum_err)**2 + (1/np.sqrt(lev2.n_msmts))**2))
+lev2['weight'] = 1/(np.sqrt((lev2.cum_err)**2 + (1/np.sqrt(lev2.n_msmts))**2))
 
 lev2['group'] = 'NoGroup'
 condlist = [lev2['td']>=10*365.25, lev2['td']>=365.25, lev2['td']<365.25]
@@ -467,6 +499,7 @@ while n > 0:
     lev3['dup'] = lev3.duplicated(subset='labels')
     dups = lev3.copy()[lev3['dup'] == True]
     n = dups['dup'].count()
+    lev3 = lev3.drop(['newlabels'], axis=1)
 
 print "assigning targets to layers"
 m = flopy.modflow.Modflow(model_ws=mfpath)
@@ -518,46 +551,9 @@ lev3 = lev3[(lev3['layer'] != -999)]  # removing wells below the model bottom
     BAIL ON THE IDEA OF A LOGICAL DECLUSTER ALGORITHM.  TOO MANY HEADACHES TO JUSTIFY AT THIS TIME.  COULD PURGE VIA
     A LIST INSTEAD.  HOWEVER, FOR NOW, SIMPLY ACCEPTING CLUSTERS.
 if decluster:
-    pre_dc_outshape = outshape[:-4] + '_pre-decluster.shp'
-    lev3 = lev3.drop(['keep', 'dup', 'newlabels', 'date', 'time'], axis=1)
-    lev3.to_file(pre_dc_outshape)
-    print '\nDeclustering target wells.  A shapefile of the potential targets BEFORE declustering is available here:\n' \
-          '{}'.format(pre_dc_outshape)
-    # create a buffer around each target.  Dissolve overlaping buffers (u_union).
-    buffers = lev3.buffer(decluster_radius)
-    buffers = buffers.reset_index()
-    buffers.columns = ['index', 'geometry']
-    buffers = gpd.GeoDataFrame(buffers, crs=UTM83Z16_ft)
-    buffers = buffers.drop('index', axis=1)
-    lev4 = lev3.copy()
-    lev4 = lev4.reset_index()  # so can line-up geometry with buffer's geometry
-    lev4['geometry'] = buffers['geometry']
-    buffershape = outshape[:-4] + '_buffers.shp'
-    lev4 = lev4.drop(['site_no'], axis=1)  # too long for shapefile.  could convert to string.
-    lev4.to_file(buffershape)
-    areas = gpd.GeoSeries(buffers['geometry'].unary_union)
-    areas = areas.reset_index()
-    areas.columns = ['index', 'geometry']
-    areas = gpd.GeoDataFrame(areas, crs=UTM83Z16_ft)
-    areashape = outshape[:-4] + '_areas.shp'
-    areas.to_file(areashape)
-    # Now need to process this multipolygon output so can assign a unique ID (index) to each dissolved polygon.
-    #  http://gis.stackexchange.com/questions/5405/using-shapely-translating-between-polygons-and-multipolygons
-    source = ogr.Open(areashape)
-    layers = source.GetLayer(0)
-    element = layers[0]
-    geom = loads(element.GetGeometryRef().ExportToWkb())
-    poly = []
-    [poly.append(pol) for pol in geom]
-    lev5 = lev3.copy()
-    zones = gpd.GeoSeries(poly)  # series with unique IDs (index)
-    # could convert zones to gdf and export to shapefile and use arcpy to intersect...
-
-    # Need to bail on this and simply provide a list of station ids to eliminate due to clustering.  This will be fine
-    # for a FWP-specific script and still allow for re-running and automation with multi-layer models.
-    decluster_ids = []
-    lev3 = lev3.loc[~lev3[index].isin(decluster_ids), :] # keep wells that are not in this list
-    '''
+    use pysal.threshold_binaryW_from_shapefile (or from array) using 10,000ft threshold.  Then use the number of
+    neighbors (w/in 10 cell distances) to reduce the weight.  For example: new std = old std * sqrt (n_neigbors)
+'''
 
 # Format for Mod2Obs, including unique 10-digit IDs
 # Setup for mod2obs1; could use regular mod2obs if remove "a" values from ofp.write, below.
@@ -606,7 +602,7 @@ if decluster:
 else:
     lev3 = lev3.drop(['keep', 'dup', 'newlabels', 'date', 'time', 'w', 'hashname', 'bangname'], axis=1)
 '''
-lev3 = lev3.drop(['keep', 'dup', 'newlabels', 'date', 'time', 'w', 'hashname', 'bangname'], axis=1)
+lev3 = lev3.drop(['keep', 'dup', 'date', 'time', 'w', 'hashname', 'bangname'], axis=1)
 print '\nA shapefile of the final targets is located here:\n' \
       '{}'.format(outshape)
 lev3.to_file(outshape)
