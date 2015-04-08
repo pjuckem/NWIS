@@ -362,67 +362,7 @@ lev2['group'] = 'NoGroup'
 condlist = [lev2['td']>=10*365.25, lev2['td']>=365.25, lev2['td']<365.25]
 choicelist = ['long-term', 'medium-term', 'short-term']
 lev2['group'] = np.select(condlist, choicelist,'OOPS')
-'''
-for i, s in lev2.iterrows():
-    #   map or GPS location?    Measured with tape or estimated?   approx 2 msmts per year?    > 20 yrs of record?
-    if (lev2.alt_acy_va[i] <= .5 and lev2.cum_err[i] <= .1 and lev2.n_msmts[i] >= 40 and lev2.td[i] >= (20* 365.242)):  #BEST of the best
-        lev2.loc[i, 'weight'] = 50
-        lev2.loc[i, 'group'] = 'long-t_mwell'
-    elif (lev2.alt_acy_va[i] <= 1.0 and lev2.cum_err[i] <= 1.0 and lev2.n_msmts[i] >= 40 and lev2.td[i] >= (20* 365.242)):  # better of the best
-        lev2.loc[i, 'weight'] = 40
-        lev2.loc[i, 'group'] = 'long-t_mwell'
-    elif (lev2.alt_acy_va[i] > 1.0 and lev2.cum_err[i] <= 1.0 and lev2.n_msmts[i] >= 40 and lev2.td[i] >= (20* 365.242)):  # best
-        lev2.loc[i, 'weight'] = 29
-        lev2.loc[i, 'group'] = 'long-t_mwell'
-    elif (lev2.alt_acy_va[i] > 1.0 and lev2.cum_err[i] > 1.0 and lev2.n_msmts[i] >= 40 and lev2.td[i] >= (20* 365.242)):  # best
-        lev2.loc[i, 'weight'] = 24
-        lev2.loc[i, 'group'] = 'long-t_mwell'
 
-    #   map or GPS location?    Measured with tape or estimated?  approx 1 msmt per year?    5 - 19.9 yrs of record?
-    elif (lev2.alt_acy_va[i] <= .5 and lev2.cum_err[i] <= .1 and lev2.n_msmts[i] >= 5 and lev2.td[i] >= (5 * 365.242)):  # best
-        lev2.loc[i, 'weight'] = 30
-        lev2.loc[i, 'group'] = 'mid-t_mwell'
-    elif (lev2.alt_acy_va[i] <= 1.0 and lev2.cum_err[i] <= 1.0 and lev2.n_msmts[i] >= 5 and lev2.td[i] >= (5 * 365.242)):  # best
-        lev2.loc[i, 'weight'] = 25
-        lev2.loc[i, 'group'] = 'mid-t_mwell'
-    elif (lev2.alt_acy_va[i] > 1.0 and lev2.cum_err[i] <= 1.0 and lev2.n_msmts[i] >= 5 and lev2.td[i] >= (5 * 365.242)):  # good
-        lev2.loc[i, 'weight'] = 17
-        lev2.loc[i, 'group'] = 'mid-t_mwell'
-    elif (lev2.alt_acy_va[i] > 1.0 and lev2.cum_err[i] > 1.0 and lev2.n_msmts[i] >= 5 and lev2.td[i] >= (5 * 365.242)):  # good
-        lev2.loc[i, 'weight'] = 16
-        lev2.loc[i, 'group'] = 'mid-t_mwell'
-
-    #   map or GPS location?    Measured with tape or estimated?   approx 1 msmt per season?    > 1 yr of record?
-    elif (lev2.alt_acy_va[i] <= .5 and lev2.cum_err[i] <= .1 and lev2.n_msmts[i] >= 4 and lev2.td[i] >= 365.242):  # good
-        lev2.loc[i, 'weight'] = 20
-        lev2.loc[i, 'group'] = 'shrt-t_well'
-    elif (lev2.alt_acy_va[i] <= 1.0 and lev2.cum_err[i] <= 1.0 and lev2.n_msmts[i] >= 4 and lev2.td[i] >= 365.242):  # good
-        lev2.loc[i, 'weight'] = 15
-        lev2.loc[i, 'group'] = 'shrt-t_well'
-    elif (lev2.alt_acy_va[i] > 1.0 and lev2.cum_err[i] <= 1.0 and lev2.n_msmts[i] >= 4 and lev2.td[i] >= 365.242):  # fair
-        lev2.loc[i, 'weight'] = 11
-        lev2.loc[i, 'group'] = 'shrt-t_well'
-    elif (lev2.alt_acy_va[i] > 1.0 and lev2.cum_err[i] > 1.0 and lev2.n_msmts[i] >= 4 and lev2.td[i] >= 365.242):  # fair
-        lev2.loc[i, 'weight'] = 10
-        lev2.loc[i, 'group'] = 'shrt-t_well'
-
-    # Note: earlier filters should have removed wells with <min_msmts unless they had really good locational accuracy
-    #   map or GPS location?    Measured with tape or estimated?   take what we can get..........
-    elif (lev2.alt_acy_va[i] <= .5 and lev2.cum_err[i] <= .1 and lev2.td[i] < 365.242):  # fair
-        lev2.loc[i, 'weight'] = 9
-        lev2.loc[i, 'group'] = 'few-msmt_well'
-    elif (lev2.alt_acy_va[i] <= 1.0 and lev2.cum_err[i] <= 1.0 and lev2.td[i] < 365.242):  # poor
-        lev2.loc[i, 'weight'] = 8
-        lev2.loc[i, 'group'] = 'few-msmt_well'
-    elif (lev2.alt_acy_va[i] > 1.0 and lev2.cum_err[i] <= 1.0 and lev2.td[i] < 365.242):  # poor
-        lev2.loc[i, 'weight'] = 5
-        lev2.loc[i, 'group'] = 'few-msmt_well'
-    elif (lev2.alt_acy_va[i] > 1.0 and lev2.cum_err[i] > 1.0 and lev2.td[i] < 365.242):  # poor
-        lev2.loc[i, 'weight'] = 4
-        lev2.loc[i, 'group'] = 'few-msmt_well'
-
-    else: lev2.loc[i, 'weight'] = -2.0  # Should ID problems
-'''
 # Join-in site information
 lev3 = lev2.join(siteinfodf.loc[:, ['station_nm', 'county_cd', 'dec_lat_va', 'dec_long_va', 'coord_acy_cd',
                                      'nat_aqfr_cd', 'aqfr_cd', 'aqfr_type_cd', 'alt_va', 'well_depth_va']])
