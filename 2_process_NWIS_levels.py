@@ -23,12 +23,10 @@ import geopandas as gpd
 import pandas as pd
 from fiona import crs
 from shapely.geometry import Point, LineString, Polygon
-from shapely.wkb import loads
 import sys
 import os
 import flopy
-import ogr
-import arcpy
+import pysal as ps
 
 
 if sys.platform == 'darwin' or 'nix' in sys.platform:
@@ -79,8 +77,8 @@ ss_arbitrary_time = '12:00:00'
 glacial_networks = ['glacetn1', 'glacfps1', 'glacpas1', 'wmicfpsag2a', 'wmicfpsag2b', 'wmiclusag1a', 'wmiclusag1b',
                   'wmiclusag2', 'wmicreffo1', 'wmicsus2', 'glacmss1']
 glac_only = True
-#decluster = True
-#decluster_radius = 2000  # units of the projection (usually meters, except ft if using UTM-feet)
+decluster = True
+decluster_distance = 10000  # units of the projection; 10x the cell size for FWP
 start = dt.datetime(1970, 1, 1)  # start and end dates for evaluating WL data
 end = dt.datetime(2013, 12, 31)
 min_msmts = 2  # minimum number of wl msmts in NWIS to be included as a target (eliminates pre-1980 WCRs)
@@ -349,16 +347,16 @@ lev2 = lev2.copy().join(tdiff2.loc[:])  # add time differences
 # likely associated with accurate locations (RTK-GPS), so alt_err also a priority.
 # Priority for weighting: 1) time span, 2) # measurements, 3) alt accuracy, 4) cum msmt err
 print "assigning weights & target groups"
-lev2['weight'] = -1.0
+lev2['ini_weight'] = -1.0
 # Compute weight as 1/(composite-std), where composite-std is computed as the squareroot of the sum of variances associated with
-# 1. half the altitude error, 2. measurement error, and 3. number of measurements.  The standard deviation for weighting based on the
+# 1. half the altitude error, 2. measurement error, and 3. number of measurements.  OK, the standard deviation for weighting based on the
 # number of measurements has nothing to do with the variability of the measured values.  Instead, the std value is computed as
 # 1/squareroot of the number of measurements.  Thus, wells with many msmts have less uncertainty (std) associated with them.
-# Altitude error was not squared (add std rather than var) because it was overly diluting weights for long-term wells that
+# Altitude error was ultimately dropped because it was overly diluting weights for long-term wells that
 # had never been surveyed. That is, it was counter-acting the value of long-term records for wells in the GW network.
 
-# lev2['weight'] = 1/(np.sqrt((lev2.alt_acy_va) + (lev2.cum_err)**2 + (1/np.sqrt(lev2.n_msmts))**2))
-lev2['weight'] = 1/(np.sqrt((lev2.cum_err)**2 + (1/np.sqrt(lev2.n_msmts))**2))
+# lev2['ini_weight'] = 1/(np.sqrt((lev2.alt_acy_va) + (lev2.cum_err)**2 + (1/np.sqrt(lev2.n_msmts))**2))
+lev2['ini_weight'] = 1/(np.sqrt((lev2.cum_err)**2 + (1/np.sqrt(lev2.n_msmts))**2))
 
 lev2['group'] = 'NoGroup'
 condlist = [lev2['td']>=10*365.25, lev2['td']>=365.25, lev2['td']<365.25]
@@ -501,6 +499,9 @@ while n > 0:
     n = dups['dup'].count()
     lev3 = lev3.drop(['newlabels'], axis=1)
 
+print "Removing spaces from all names."
+lev3['labels'] = lev3['labels'].str.replace(' ', '_')
+
 print "assigning targets to layers"
 m = flopy.modflow.Modflow(model_ws=mfpath)
 nf = flopy.utils.mfreadnam.parsenamefile(os.path.join(mfpath, mfnam), {})
@@ -534,9 +535,9 @@ minval = layer.min()
 if minval < 0:
     print "At least one target has a well bottom below the bottom of the model.  They will be removed as targets"
 maxval = layer.max()
-if maxval >= 999:
-    print "At least one target has a well bottom above the land surface.  They have been assigned to layer 1," \
-          "but they should be inspected using the shapefile (layer = 999) and site_information files."
+if maxval >= 999.0:
+    layer = np.where(layer >= 999.0, 1, layer)
+    print "At least one target has a well bottom above the model top.  They have been assigned to layer 1."
 
 lev3['layer'] = layer
 lev3['x'] = xcoords
@@ -546,14 +547,25 @@ lev3['time'] = ss_arbitrary_time
 lev3['target'] = lev3['alt_va'] - lev3['lev_va']
 lev3 = lev3[(lev3['layer'] != -999)]  # removing wells below the model bottom
 
-# Decluster wells
-'''
-    BAIL ON THE IDEA OF A LOGICAL DECLUSTER ALGORITHM.  TOO MANY HEADACHES TO JUSTIFY AT THIS TIME.  COULD PURGE VIA
-    A LIST INSTEAD.  HOWEVER, FOR NOW, SIMPLY ACCEPTING CLUSTERS.
+# Decluster wells by reducing weights.
 if decluster:
-    use pysal.threshold_binaryW_from_shapefile (or from array) using 10,000ft threshold.  Then use the number of
-    neighbors (w/in 10 cell distances) to reduce the weight.  For example: new std = old std * sqrt (n_neigbors)
-'''
+    print 'Reducing weight for wells that are clustered within {} (units of the projection) of each other'.format(decluster_distance)
+    #re-do geometry after purging wells below the model bot
+    geom = lev3['geometry'].tolist()
+    xcoords = [geom[i].x for i,j in enumerate(geom)]
+    ycoords = [geom[i].y for i,j in enumerate(geom)]
+    xy = zip(xcoords, ycoords)
+    pts = np.array(xy)
+    w_pts = ps.threshold_binaryW_from_array(pts, decluster_distance)  # count neighbors within "dist" of each point
+    ws = [w_pts.weights[i] for i,j in enumerate(w_pts)]  # pull out a list of weights for each pt. The list contains a 1 for each neighbor
+    ws = np.array(ws)
+    sm = [np.sum(i, axis=0) for i in ws]  # sum-up all of the weights (n_neighbors) for each point and convert to a vector array
+    sm = np.array(sm)
+    lev3['neighbors'] = sm +1  # +1 to count all pts w/in threshold, including self.  Also avoids divid-by-zero problems.
+    #lev3['weight'] = lev3['ini_weight'] / np.sqrt(lev3['neighbors'])
+    lev3['weight'] = lev3['ini_weight'] / lev3['neighbors']
+else:
+    lev3['weight'] = lev3['ini_weight']
 
 # Format for Mod2Obs, including unique 10-digit IDs
 # Setup for mod2obs1; could use regular mod2obs if remove "a" values from ofp.write, below.
@@ -596,12 +608,7 @@ lev3.to_csv(pest_head_obs_sect_file, columns=[u'Name',u'target',u'weight',u'grou
                   sep=' ', float_format='%.3f', index='', header='', line_terminator=newline)
 print '\nSuccessful completion.  Mod2Obs files are located here:\n' \
       '{}'.format(outpath)
-'''
-if decluster:
-    lev3 = lev3.drop(['w', 'hashname', 'bangname'], axis=1)
-else:
-    lev3 = lev3.drop(['keep', 'dup', 'newlabels', 'date', 'time', 'w', 'hashname', 'bangname'], axis=1)
-'''
+
 lev3 = lev3.drop(['keep', 'dup', 'date', 'time', 'w', 'hashname', 'bangname'], axis=1)
 print '\nA shapefile of the final targets is located here:\n' \
       '{}'.format(outshape)
